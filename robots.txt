@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://mralmwry173-ship-it.github.io/matjar-yemen-android/sitemap.xml
