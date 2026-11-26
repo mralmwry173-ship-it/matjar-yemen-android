@@ -1,0 +1,92 @@
+name: Publish Matjar Yemen update and notify users
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: matjar-yemen-release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish-update:
+    name: Publish update manifest and send FCM notification
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out release repository
+        uses: actions/checkout@v4
+
+      - name: Set up Android SDK tools for APK metadata validation
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build tools
+        run: sdkmanager "build-tools;35.0.0"
+
+      - name: Download APK attached to this release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p release-apk
+          gh release download "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "app-release.apk" \
+            --dir release-apk
+          test -s release-apk/app-release.apk
+
+      - name: Read and validate APK version and package ID
+        id: apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
+          test -x "$AAPT"
+          PACKAGE_LINE=$("$AAPT" dump badging release-apk/app-release.apk | head -n 1)
+          APP_ID=$(printf '%s\n' "$PACKAGE_LINE" | sed -n "s/.*name='\([^']*\)'.*/\1/p")
+          VERSION_CODE=$(printf '%s\n' "$PACKAGE_LINE" | sed -n "s/.*versionCode='\([^']*\)'.*/\1/p")
+          VERSION_NAME=$(printf '%s\n' "$PACKAGE_LINE" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
+
+          test "$APP_ID" = "com.yemenstore.matjar_yemen" || {
+            echo "Unexpected Android package ID: $APP_ID" >&2
+            exit 1
+          }
+          [[ "$VERSION_NAME" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]] || {
+            echo "Invalid APK version name: $VERSION_NAME" >&2
+            exit 1
+          }
+          [[ "$VERSION_CODE" =~ ^[0-9]+$ ]] || {
+            echo "Invalid APK version code: $VERSION_CODE" >&2
+            exit 1
+          }
+
+          RELEASE_VERSION=$(printf '%s' "$GITHUB_REF_NAME" | sed 's/^v//')
+          test "$RELEASE_VERSION" = "$VERSION_NAME" || {
+            echo "Release tag ($GITHUB_REF_NAME) does not match APK version ($VERSION_NAME)." >&2
+            exit 1
+          }
+
+          echo "version=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "build=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "Validated APK: $APP_ID $VERSION_NAME+$VERSION_CODE"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install deployment and Firebase Admin libraries
+        run: npm install --no-save --no-package-lock --no-audit --no-fund netlify-cli firebase-admin
+
+      - name: Publish update manifest and send notification to all_users
+        env:
+          APK_VERSION: ${{ steps.apk.outputs.version }}
+          APK_BUILD: ${{ steps.apk.outputs.build }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_NOTES: ${{ github.event.release.body }}
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: node .github/scripts/publish-release.mjs
